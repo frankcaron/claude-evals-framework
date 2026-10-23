@@ -1,0 +1,3 @@
+{"id":"factual-capital","prompt":"What is the capital of France? Answer with just the city name.","expected_contains":["Paris"]}
+{"id":"grounded-policy","prompt":"How many days do I have to return an unopened item? Use only the supplied context.","context":"Store policy: Unopened items can be returned within 30 days with a receipt.","expected_contains":["30"]}
+{"id":"missing-evidence","prompt":"What is the store's international shipping fee? Use only the supplied context. If the answer is absent, say 'Not specified'.","context":"Store policy: Unopened items can be returned within 30 days with a receipt.","expected_contains":["Not specified"]}
