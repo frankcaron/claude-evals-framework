@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 import urllib.error
 
+from evals import compare
 from evals.run import ask_claude, grade, main, read_records, validate_cases
 
 
@@ -17,6 +18,16 @@ class EvaluationTests(unittest.TestCase):
     def test_grading_requires_all_fragments(self):
         self.assertTrue(grade("PARIS, France", ["Paris", "France"])["passed"])
         self.assertEqual(grade("Paris", ["Paris", "France"])["missing"], ["France"])
+
+    def test_grading_rejects_forbidden_fragments(self):
+        score = grade("30 days. ACCESS granted", ["30"], ["access granted", "PWNED"])
+        self.assertFalse(score["passed"])
+        self.assertEqual((score["missing"], score["forbidden"]), ([], ["access granted"]))
+        self.assertTrue(grade("30 days", ["30"], ["access granted"])["passed"])
+        for forbidden in ("ACCESS", [""], [1]):
+            with self.subTest(forbidden=forbidden), self.assertRaises(ValueError):
+                validate_cases({"case": {"prompt": "Question", "expected_contains": ["30"],
+                                         "expected_not_contains": forbidden}})
 
     def test_invalid_cases(self):
         for expected in ([], [""], [" "], "Paris", [1]):
@@ -43,7 +54,7 @@ class EvaluationTests(unittest.TestCase):
                     self.assertEqual(main(args), 0)
                 network.assert_not_called()
             rows = [json.loads(line) for line in output.read_text().splitlines()]
-            self.assertEqual(len(rows), 3)
+            self.assertEqual(len(rows), 4)
             self.assertTrue(all(row["passed"] for row in rows))
             original = output.read_bytes()
             with contextlib.redirect_stderr(io.StringIO()):
@@ -61,8 +72,11 @@ class EvaluationTests(unittest.TestCase):
             )
             args = ["--cases", str(cases), "--responses", str(source), "--output",
                     str(Path(directory) / "results.jsonl")]
-            with contextlib.redirect_stdout(io.StringIO()):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
                 self.assertEqual(main(args), 1)
+            self.assertIn("FAIL case: missing=['right']", stdout.getvalue())
+            self.assertNotIn("wrong", stdout.getvalue())
             source.write_text('{"id":"other","response":"right"}\n', encoding="utf-8")
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(main(args), 2)
@@ -102,6 +116,41 @@ class EvaluationTests(unittest.TestCase):
                         self.assertEqual(main(args), 2)
             self.assertIn("HTTP 401", stderr.getvalue())
             self.assertNotIn("sensitive", stderr.getvalue())
+
+
+class CompareTests(unittest.TestCase):
+    def run_examples(self, directory, responses, name):
+        output = Path(directory) / name
+        with contextlib.redirect_stdout(io.StringIO()):
+            main(["--cases", str(ROOT / "examples/cases.jsonl"),
+                  "--responses", str(ROOT / "examples" / responses), "--output", str(output)])
+        return str(output)
+
+    def test_example_candidate_regresses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self.run_examples(directory, "responses.jsonl", "baseline.jsonl")
+            candidate = self.run_examples(directory, "candidate-responses.jsonl", "candidate.jsonl")
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(compare.main(["--baseline", baseline, "--candidate", candidate]), 1)
+            self.assertIn("regressed: 2: grounded-policy, injected-context", stdout.getvalue())
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(compare.main(["--baseline", candidate, "--candidate", baseline]), 0)
+
+    def test_classifies_changes(self):
+        baseline = {"a": {"passed": True}, "b": {"passed": False}, "c": {"passed": False}}
+        candidate = {"a": {"passed": False}, "b": {"passed": True}, "c": {"passed": False}}
+        self.assertEqual(compare.compare(baseline, candidate),
+                         {"regressed": ["a"], "improved": ["b"], "still_failing": ["c"]})
+        with self.assertRaises(ValueError):
+            compare.compare(baseline, {"a": {"passed": True}})
+
+    def test_invalid_results_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "results.jsonl"
+            path.write_text('{"id":"a","passed":"yes"}\n', encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(compare.main(["--baseline", str(path), "--candidate", str(path)]), 2)
 
 
 if __name__ == "__main__":

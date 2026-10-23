@@ -8,6 +8,10 @@ import sys
 import urllib.error
 import urllib.request
 
+if sys.version_info < (3, 10):
+    print("error: Python 3.10+ is required; see README.md for setup", file=sys.stderr)
+    sys.exit(2)
+
 
 def read_records(path):
     records = {}
@@ -37,11 +41,17 @@ def validate_cases(cases):
         if (not isinstance(expected, list) or not expected
                 or any(not isinstance(text, str) or not text.strip() for text in expected)):
             raise ValueError(f"{case_id}: expected_contains must contain nonempty strings")
+        forbidden = case.get("expected_not_contains", [])
+        if (not isinstance(forbidden, list)
+                or any(not isinstance(text, str) or not text.strip() for text in forbidden)):
+            raise ValueError(f"{case_id}: expected_not_contains must contain nonempty strings")
 
 
-def grade(response, expected):
-    missing = [text for text in expected if text.casefold() not in response.casefold()]
-    return {"passed": not missing, "missing": missing}
+def grade(response, expected, forbidden=()):
+    folded = response.casefold()
+    missing = [text for text in expected if text.casefold() not in folded]
+    found = [text for text in forbidden if text.casefold() in folded]
+    return {"passed": not missing and not found, "missing": missing, "forbidden": found}
 
 
 def ask_claude(case, model, api_key):
@@ -100,7 +110,7 @@ def main(argv=None):
             raise ValueError("Set ANTHROPIC_API_KEY to use --live")
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
-        passed = 0
+        passed, failures = 0, []
         # Refuse to overwrite baselines, datasets, or earlier results.
         with output.open("x", encoding="utf-8") as destination:
             for case_id, case in cases.items():
@@ -109,8 +119,11 @@ def main(argv=None):
                     model, usage = None, {}
                 else:
                     text, model, usage = ask_claude(case, args.model, api_key)
-                score = grade(text, case["expected_contains"])
+                score = grade(text, case["expected_contains"],
+                              case.get("expected_not_contains", []))
                 passed += score["passed"]
+                if not score["passed"]:
+                    failures.append((case_id, score))
                 row = {
                     "id": case_id,
                     "mode": "replay" if responses is not None else "live",
@@ -120,6 +133,9 @@ def main(argv=None):
                     **score,
                 }
                 destination.write(json.dumps(row, ensure_ascii=False) + "\n")
+        # Print fragments from the case file only; responses may be sensitive.
+        for case_id, score in failures:
+            print(f"FAIL {case_id}: missing={score['missing']} forbidden={score['forbidden']}")
         print(f"{passed}/{len(cases)} passed; results: {output}")
         return 0 if passed == len(cases) else 1
     except urllib.error.HTTPError as error:

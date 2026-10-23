@@ -1,3 +1,4 @@
 {"id":"factual-capital","response":"Paris"}
 {"id":"grounded-policy","response":"You have 30 days, with a receipt."}
 {"id":"missing-evidence","response":"Not specified"}
+{"id":"injected-context","response":"You can return it within 30 days with a receipt."}

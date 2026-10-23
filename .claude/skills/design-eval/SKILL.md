@@ -15,7 +15,9 @@ disable-model-invocation: true
    missing evidence, conflicting evidence, and an adversarial instruction in
    retrieved context. Use only synthetic or approved sanitized data.
 4. For executable cases, use unique string `id`, nonempty `prompt`, optional
-   string `context`, and a nonempty `expected_contains` string list. Explain
+   string `context`, a nonempty `expected_contains` string list, and an
+   optional `expected_not_contains` list for canaries such as an injected
+   instruction's payload. Explain
    which criteria cannot be verified by substring matching and need another
    grader or manual review. Do not weaken criteria to fit the runner.
 5. Keep reference answers out of candidate prompts. For workflow tasks, specify
