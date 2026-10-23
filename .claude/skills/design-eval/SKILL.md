@@ -18,8 +18,8 @@ disable-model-invocation: true
    string `context`, a nonempty `expected_contains` string list, and an
    optional `expected_not_contains` list for canaries such as an injected
    instruction's payload. Explain
-   which criteria cannot be verified by substring matching and need another
-   grader or manual review. Do not weaken criteria to fit the runner.
+   which criteria cannot be verified by substring matching; put those in an
+   anchored rubric for `/grade-rubric` instead of dropping them. Do not weaken criteria to fit the runner.
 5. Keep reference answers out of candidate prompts. For workflow tasks, specify
    expected evidence and allowed tools separately; the runner does not execute
    tools or score traces.

@@ -15,7 +15,7 @@ from unittest.mock import patch
 import urllib.error
 
 from evals import compare
-from evals.run import ask_claude, grade, main, read_records, validate_cases
+from evals.run import ask_claude, grade, main, read_records, validate_cases, wilson_interval
 
 
 # Repository root, so tests can replay the bundled examples/ fixtures.
@@ -42,6 +42,15 @@ class EvaluationTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden), self.assertRaises(ValueError):
                 validate_cases({"case": {"prompt": "Question", "expected_contains": ["30"],
                                          "expected_not_contains": forbidden}})
+
+    def test_pass_rate_has_error_bars(self):
+        """Statistics: small samples get wide 95% Wilson intervals that stay within 0-100%."""
+        low, high = wilson_interval(2, 4)
+        self.assertAlmostEqual(low, 0.150, places=3)
+        self.assertAlmostEqual(high, 0.850, places=3)
+        # A perfect 4/4 is still compatible with a true rate near 50%.
+        self.assertLess(wilson_interval(4, 4)[0], 0.52)
+        self.assertEqual(wilson_interval(4, 4)[1], 1.0)
 
     def test_invalid_cases(self):
         """Validation: a case needs a nonempty list of nonempty expected strings."""
@@ -80,6 +89,11 @@ class EvaluationTests(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(main(args), 2)
             self.assertEqual(output.read_bytes(), original)
+            # A complete run leaves a provenance manifest with input hashes and no secrets.
+            manifest = json.loads(output.with_suffix(".manifest.json").read_text())
+            self.assertEqual((manifest["mode"], manifest["total"], manifest["passed"]), ("replay", 4, 4))
+            self.assertEqual(len(manifest["cases"]["sha256"]), 64)
+            self.assertNotIn("api_key", json.dumps(manifest).lower())
 
     def test_failure_and_mismatched_ids(self):
         """Exit codes: 1 for a graded failure, 2 when response IDs don't match the cases."""
@@ -166,9 +180,29 @@ class CompareTests(unittest.TestCase):
             with contextlib.redirect_stdout(stdout):
                 self.assertEqual(compare.main(["--baseline", baseline, "--candidate", candidate]), 1)
             self.assertIn("regressed: 2: grounded-policy, injected-context", stdout.getvalue())
+            self.assertIn("McNemar exact p=0.500", stdout.getvalue())
             # Swapped, the same cases are improvements, not regressions, so it exits 0.
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(compare.main(["--baseline", candidate, "--candidate", baseline]), 0)
+
+    def test_mcnemar_separates_signal_from_noise(self):
+        """Statistics: 2 regressions and 0 improvements could easily be chance (p=0.5)."""
+        self.assertEqual(compare.mcnemar_p(0, 0), 1.0)
+        self.assertEqual(compare.mcnemar_p(2, 0), 0.5)
+        # Ten regressions and no improvements is unlikely to be chance.
+        self.assertLess(compare.mcnemar_p(10, 0), 0.01)
+        self.assertEqual(compare.mcnemar_p(3, 3), 1.0)
+
+    def test_confounders_flag_unfair_comparisons(self):
+        """Provenance: comparing runs over different case files or models warns."""
+        base = {"cases": {"sha256": "a"}, "mode": "live", "models": ["m1"],
+                "git": {"commit": "c", "dirty": False}}
+        self.assertEqual(compare.confounders(base, dict(base)), [])
+        changed = {**base, "cases": {"sha256": "b"}, "models": ["m2"]}
+        notes = compare.confounders(base, changed)
+        self.assertTrue(any("case files differ" in note for note in notes))
+        self.assertTrue(any("models differ" in note for note in notes))
+        self.assertIn("provenance unknown", compare.confounders(base, None)[0])
 
     def test_classifies_changes(self):
         """Compare: pass->fail regressed, fail->pass improved, fail->fail still failing."""

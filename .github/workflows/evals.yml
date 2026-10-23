@@ -1,0 +1,35 @@
+name: evals
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        run: python3 -m unittest discover -s "$PWD/tests" -v
+      # Offline replay only: no API key, no network calls, no cost.
+      - name: Replay bundled baseline
+        run: >
+          python3 "$PWD/evals/run.py"
+          --cases "$PWD/examples/cases.jsonl"
+          --responses "$PWD/examples/responses.jsonl"
+          --output "$PWD/results/ci-baseline.jsonl"
+      - name: Validate example rubric grades
+        run: >
+          python3 "$PWD/evals/rubric.py" summarize
+          --rubric "$PWD/examples/rubric.json"
+          --grades "$PWD/examples/grades-candidate-human.jsonl"
+          --cases "$PWD/examples/cases.jsonl" || test $? -eq 1
