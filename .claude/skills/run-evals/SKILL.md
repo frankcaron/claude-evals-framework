@@ -23,7 +23,9 @@ disable-model-invocation: true
 4. For a comparison, evaluate each variant's recorded responses against the
    same cases, then run
    `python3 "$PWD/evals/compare.py" --baseline <baseline results> --candidate <candidate results>`.
-   Exit 1 means at least one regression. Report per-case regressions and
+   Exit 1 means at least one regression. Report the pass-rate intervals and
+   the McNemar p-value, and treat every `WARNING` line as a confounder to
+   resolve before drawing conclusions. Report per-case regressions and
    improvements, read the changed responses, and identify changes to model,
    prompt, corpus, tools, or grader that confound comparison; the script sees
    only pass/fail flags and cannot detect them.

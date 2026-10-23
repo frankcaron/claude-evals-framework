@@ -1,9 +1,14 @@
 """Small JSONL evaluation runner using only the Python standard library."""
 
 import argparse
+from datetime import datetime, timezone
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import platform
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -54,13 +59,33 @@ def grade(response, expected, forbidden=()):
     return {"passed": not missing and not found, "missing": missing, "forbidden": found}
 
 
+def wilson_interval(passed, total, z=1.96):
+    """95% Wilson score interval for a pass rate; stays inside [0, 1] for small n."""
+    if not total:
+        return 0.0, 0.0
+    rate = passed / total
+    center = (rate + z * z / (2 * total)) / (1 + z * z / total)
+    margin = z * math.sqrt(rate * (1 - rate) / total + z * z / (4 * total * total))
+    margin /= 1 + z * z / total
+    return max(0.0, center - margin), min(1.0, center + margin)
+
+
+def format_rate(passed, total):
+    low, high = wilson_interval(passed, total)
+    return f"{passed}/{total} ({passed / total:.0%}, 95% CI {low:.0%}-{high:.0%})"
+
+
 def ask_claude(case, model, api_key):
     prompt = case["prompt"]
     if case.get("context"):
         prompt = f"Context:\n{case['context']}\n\nQuestion:\n{prompt}"
+    return send_message(prompt, model, api_key)
+
+
+def send_message(prompt, model, api_key, max_tokens=512):
     payload = {
         "model": model,
-        "max_tokens": 512,
+        "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
     request = urllib.request.Request(
@@ -83,6 +108,46 @@ def ask_claude(case, model, api_key):
     if not text.strip():
         raise ValueError("Claude returned no text")
     return text, result["model"], result.get("usage", {})
+
+
+def sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest() if path else None
+
+
+def git_revision():
+    """Commit and dirty flag of this checkout, or None outside a Git repository."""
+    root = Path(__file__).resolve().parents[1]
+    try:
+        commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                capture_output=True, text=True, check=True).stdout.strip()
+        status = subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return {"commit": commit, "dirty": bool(status.strip())}
+
+
+def manifest_path(output):
+    return Path(output).with_suffix(".manifest.json")
+
+
+def write_manifest(output, args, models, total, passed):
+    """Record provenance beside a completed results file; never includes secrets."""
+    manifest = {
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "mode": "live" if args.live else "replay",
+        "requested_model": args.model,
+        "models": sorted(models),
+        "cases": {"path": args.cases, "sha256": sha256(args.cases)},
+        "responses": {"path": args.responses, "sha256": sha256(args.responses)},
+        "git": git_revision(),
+        "python": platform.python_version(),
+        "total": total,
+        "passed": passed,
+    }
+    with manifest_path(output).open("x", encoding="utf-8") as destination:
+        json.dump(manifest, destination, indent=2)
+        destination.write("\n")
 
 
 def main(argv=None):
@@ -109,8 +174,12 @@ def main(argv=None):
         if args.live and not api_key:
             raise ValueError("Set ANTHROPIC_API_KEY to use --live")
         output = Path(args.output)
+        if output.suffix != ".jsonl":
+            raise ValueError("--output must end in .jsonl")
+        if manifest_path(output).exists():
+            raise ValueError(f"{manifest_path(output)} already exists; choose a new --output")
         output.parent.mkdir(parents=True, exist_ok=True)
-        passed, failures = 0, []
+        passed, failures, models = 0, [], set()
         # Refuse to overwrite baselines, datasets, or earlier results.
         with output.open("x", encoding="utf-8") as destination:
             for case_id, case in cases.items():
@@ -119,6 +188,7 @@ def main(argv=None):
                     model, usage = None, {}
                 else:
                     text, model, usage = ask_claude(case, args.model, api_key)
+                    models.add(model)
                 score = grade(text, case["expected_contains"],
                               case.get("expected_not_contains", []))
                 passed += score["passed"]
@@ -136,7 +206,9 @@ def main(argv=None):
         # Print fragments from the case file only; responses may be sensitive.
         for case_id, score in failures:
             print(f"FAIL {case_id}: missing={score['missing']} forbidden={score['forbidden']}")
-        print(f"{passed}/{len(cases)} passed; results: {output}")
+        # Written only after every case completes, so its presence marks a full run.
+        write_manifest(output, args, models, len(cases), passed)
+        print(f"{format_rate(passed, len(cases))} passed; results: {output}")
         return 0 if passed == len(cases) else 1
     except urllib.error.HTTPError as error:
         print(f"error: Claude API HTTP {error.code}; run incomplete", file=sys.stderr)

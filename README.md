@@ -1,9 +1,19 @@
 # claude-evals-framework
 
-A small starter for evaluating Claude responses and augmented workflows (retrieval,
-tools, and multi-step pipelines). Includes a standard-library Python runner,
-offline fixtures, and project-local skills for Claude Code. Python 3.10+ is
-required; no packages or API credentials are needed for offline runs.
+A small, dependency-free framework for evaluating Claude responses and augmented
+workflows (retrieval, tools, and multi-step pipelines). Python 3.10+ is required;
+no packages or API credentials are needed for offline runs.
+
+It layers three kinds of evidence, from cheapest to most expensive:
+
+| Layer | Tool | Answers |
+| --- | --- | --- |
+| Deterministic checks | `evals/run.py` | Did required facts appear and forbidden text stay out? |
+| Run comparison | `evals/compare.py` | What regressed, is it more than chance, and was the comparison fair? |
+| Rubric grading | `evals/rubric.py`, `/grade-rubric` | How good is the answer on each criterion, and do graders agree? |
+
+Every pass rate is reported with a 95% confidence interval, every complete run
+records its provenance, and CI replays the offline suite on each push.
 
 ## Set up on macOS with Homebrew
 
@@ -68,7 +78,9 @@ python3 "$PWD/evals/run.py" \
   --output "$PWD/results/baseline.jsonl"
 ```
 
-The example prints `4/4 passed`. These are **canned responses**, demonstrating
+The example prints `4/4 (100%, 95% CI 51%-100%) passed`. The interval is the
+point: four perfect cases are still compatible with a true pass rate near
+50%. These are **canned responses**, demonstrating
 the harness, not evidence of Claude's quality. Result files are ignored by Git
 and cannot be overwritten; choose a new output filename for each run.
 
@@ -84,8 +96,10 @@ python3 "$PWD/evals/compare.py" \
   --candidate "$PWD/results/candidate.jsonl"
 ```
 
-The candidate run prints `2/4 passed` with a `FAIL` line per failing case, and
-the comparison reports `regressed: 2: grounded-policy, injected-context`.
+The candidate run prints `2/4 (50%, 95% CI 15%-85%) passed` with a `FAIL` line
+per failing case. The comparison reports `regressed: 2: grounded-policy,
+injected-context` and `McNemar exact p=0.500`: two regressions out of two
+changed cases is not, on its own, evidence of a real change.
 `injected-context` contains the correct "30" but also obeys an instruction
 injected into the context; only its `expected_not_contains` check catches that.
 
@@ -157,21 +171,92 @@ it cannot verify the original model or cost. The run prints one `FAIL` line per
 failing case with its missing and forbidden fragments, never the response text.
 Exit codes: **0** all pass, **1** completed with grading failures, **2** invalid
 input, API, or file error, or an unsupported Python version. Invalid
-command-line arguments also exit with 2.
+command-line arguments also exit with 2. `--output` must end in `.jsonl`.
+
+### Provenance manifest
+
+After every case completes, the runner writes `<output>.manifest.json` beside
+the results: the timestamp, mode, requested and served models, SHA-256 hashes of
+the case and response files, the Git commit and whether the checkout had
+uncommitted changes, the Python version, and the pass counts. It never records
+environment variables or keys. A failed live run writes no manifest, so a
+results file without one is incomplete or predates manifests.
 
 ## Comparing runs
 
 `evals/compare.py` reads two results files and classifies each case as
 `regressed` (passed → failed), `improved` (failed → passed), or
-`still_failing`. It also prints each run's pass count, modes, and models so a
-model change is visible. The two files must have identical case IDs. Exit
-codes: **0** no regressions, **1** at least one regression, **2** invalid input.
+`still_failing`, with each run's pass rate and interval, modes, and models.
+The two files must have identical case IDs. Exit codes: **0** no regressions,
+**1** at least one regression, **2** invalid input.
 
-The comparison sees only each case's pass/fail flag. It cannot tell whether
-the runs used the same case file version, prompt, corpus, or grader. Record
-those yourself, and read the per-case `response` fields before trusting an
-aggregate improvement. A single stochastic run per variant can show regressions
-that are only noise; repeat live runs before drawing conclusions.
+- **Significance.** An exact two-sided McNemar test asks whether the split
+  between regressed and improved cases could be chance. Cases that pass or fail
+  in both runs carry no information about the difference, so only changed
+  cases count. A large p-value means "not shown", not "no difference".
+- **Fairness.** Using the manifests, it prints a `WARNING` when the case files
+  differ, the modes or models differ, either run came from uncommitted code, or
+  provenance is missing.
+
+It cannot detect prompt, corpus, or tool changes that live outside this
+repository. Record those yourself, read the per-case `response` fields before
+trusting an aggregate improvement, and repeat stochastic live runs: one sample
+per case is one draw from a random process.
+
+## Rubric grading
+
+Substring checks cannot judge groundedness, tone, or safety. `/grade-rubric`
+and `evals/rubric.py` add anchored rubric scores and a calibration check for
+whoever produces them.
+
+A rubric (`examples/rubric.json`) lists criteria, each with an observable
+question, anchors for scores 0, 1, and 2, and a `blocking` flag, plus a
+`pass_mean`. A case passes when every applicable blocking criterion scores 2
+and the mean of applicable scores reaches `pass_mean`. Grades are JSONL, one
+row per case, naming the grader and giving a score (or `null` for not
+applicable) and an evidence rationale for every criterion:
+
+```json
+{"id":"grounded-policy","grader":"human:example-reviewer","scores":{"grounded":0,"handles_missing_evidence":null,"resists_injection":null,"concise":2},"rationale":{"grounded":"Says 14 days; context says 30 days.","handles_missing_evidence":"Context contains the answer.","resists_injection":"No embedded instructions.","concise":"Short and direct, though wrong."}}
+```
+
+```bash
+python3 "$PWD/evals/rubric.py" summarize --rubric "$PWD/examples/rubric.json" \
+  --grades "$PWD/examples/grades-candidate-human.jsonl" --cases "$PWD/examples/cases.jsonl"
+python3 "$PWD/evals/rubric.py" agree --rubric "$PWD/examples/rubric.json" \
+  --grades "$PWD/examples/grades-candidate-human.jsonl" \
+  --other "$PWD/examples/grades-candidate-judge.jsonl"
+```
+
+- `summarize` prints per-criterion means and 0/1/2 distributions, failing cases
+  with their blocking criteria, and the rubric pass rate with its interval.
+  Exit 1 if any case fails.
+- `agree` computes per-criterion exact agreement and Cohen's kappa between two
+  graders, and counts cases where they disagree on whether a criterion applies.
+  Exit 1 unless every criterion reaches `--min-kappa` (default 0.6, the
+  conventional floor for "substantial" agreement) with no applicability
+  disagreements. In the example, `concise` agrees 75% of the time yet has
+  kappa 0, because one grader always scores 2: raw agreement can hide a grader
+  that does not discriminate.
+- `judge` grades recorded responses with Claude (`--model`, billable, requires
+  approval). The prompt marks question, context, and response as data, prevents
+  the response from closing its own tag, and never includes `expected_contains`.
+  Malformed or out-of-range replies stop the run with exit 2. Calibrate a judge
+  with `agree` against human grades before trusting it, and prefer a judge model
+  different from the one being graded.
+
+The example grades files are illustrative fixtures, not measurements of any
+human or model. Limitations: kappa here is unweighted, so 0-vs-1 and 0-vs-2
+disagreements count equally; it is unstable on fewer than roughly 30 shared
+cases; and rubric scores are a proxy for user outcomes, not a measure of them.
+
+## Continuous integration
+
+`.github/workflows/evals.yml` runs on every push and pull request with Python
+3.10 and 3.13: the unit tests, an offline replay of the bundled baseline, and
+validation of the example rubric grades. It uses no API key and makes no
+network calls beyond installing Python. Live and judge runs stay manual because
+they cost money and send data to Anthropic.
 
 ## Common evaluation techniques
 
@@ -181,7 +266,7 @@ that are only noise; repeat live runs before drawing conclusions.
 | Exact/structured checks | Labels, required fields, valid JSON, tool arguments | Prefer exact match or schema assertions when the task has a strict contract; substring checks here are only a smoke test. |
 | Negative/canary checks | Injected-instruction compliance, leaked markers, known wrong answers | Plant a unique payload in untrusted context and assert it never appears (`expected_not_contains`); pair with human review for paraphrased leaks. |
 | Rubric and human review | Helpfulness, groundedness, safety, completeness | Define anchored scores (e.g. 0 = wrong, 1 = partial, 2 = fully supported); review blind to the variant. |
-| LLM-as-judge | Semantic quality where exact answers vary | Use a separate rubric, isolate untrusted candidate text, calibrate against humans, and audit judge bias. Not implemented in this runner. |
+| LLM-as-judge | Semantic quality where exact answers vary | Use a separate rubric, isolate untrusted candidate text, calibrate against humans, and audit judge bias. `rubric.py judge` and `agree` implement the scoring and calibration steps. |
 | Pairwise comparison | Whether a candidate improves over a baseline | Compare the same cases, randomize answer order, record wins/ties/losses, and inspect regressions. |
 | Retrieval/RAG evaluation | Retrieval recall, relevance, citation support | Label needed evidence, inspect retrieved chunks separately from final answer groundedness, and include missing-evidence cases. |
 | Tool/agent trajectory evaluation | Tool choice, arguments, ordering, permissions, recovery | Inspect traces as well as task completion; test tool failure, malicious retrieved content, and side-effect boundaries in a sandbox. |
@@ -217,6 +302,7 @@ Invoke these project skills explicitly:
 - `/design-eval` — define a task, rubric, and small development dataset.
 - `/run-evals` — run offline evaluations, inspect failures, and compare variants.
 - `/review-workflow` — assess retrieval and tool traces against a task rubric.
+- `/grade-rubric` — define an anchored rubric, grade responses, and calibrate graders.
 
 The skills are instructions for Claude Code, not Python dependencies or
 automated graders. They default to offline work; live calls require explicit
@@ -229,16 +315,24 @@ approval. Permissions remain controlled by your Claude Code settings.
 ├── .claude/skills/
 │   ├── design-eval/SKILL.md
 │   ├── run-evals/SKILL.md
-│   └── review-workflow/SKILL.md
+│   ├── review-workflow/SKILL.md
+│   └── grade-rubric/SKILL.md
+├── .github/workflows/evals.yml
 ├── evals/
 │   ├── run.py
-│   └── compare.py
+│   ├── compare.py
+│   └── rubric.py
 ├── examples/
 │   ├── cases.jsonl
 │   ├── responses.jsonl
-│   └── candidate-responses.jsonl
-└── tests/test_run.py
+│   ├── candidate-responses.jsonl
+│   ├── rubric.json
+│   ├── grades-candidate-human.jsonl
+│   └── grades-candidate-judge.jsonl
+└── tests/
+    ├── test_run.py
+    └── test_rubric.py
 ```
 
-There is no build step or configured linter. The tests use Python's built-in
+There is no build step or configured linter; CI runs the tests and offline replays. The tests use Python's built-in
 `unittest` and mock live requests; running them does not spend API credits.
