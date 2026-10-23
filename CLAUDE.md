@@ -15,6 +15,11 @@ python3 "$PWD/evals/compare.py" --baseline "$PWD/results/check-001.jsonl" --cand
 python3 "$PWD/evals/rubric.py" summarize --rubric "$PWD/examples/rubric.json" --grades "$PWD/examples/grades-candidate-human.jsonl" --cases "$PWD/examples/cases.jsonl"
 ```
 
+Playwright integration (Node 20+), from `integrations/playwright`:
+`npm ci && npx playwright test`. In this cloud container, set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/pw-browsers/chromium` instead of
+downloading a browser.
+
 Use a fresh results filename each time. On macOS, activate the Homebrew-based
 `.venv` from README.md first; Apple's bundled `python3` may be older than 3.10. No build or linter is configured.
 
@@ -33,5 +38,8 @@ Use a fresh results filename each time. On macOS, activate the Homebrew-based
 - Report case counts, failures, and grading limitations. A canned replay is not
   a measured Claude baseline.
 - Add focused standard-library tests for runner behavior changes.
+- In Playwright suites, a failed test means a broken harness; agent failures
+  belong inside `evalRecorder.run()` so they are graded, not hidden. Never
+  enable retries for eval cases.
 
 Task procedures are in .claude/skills/.

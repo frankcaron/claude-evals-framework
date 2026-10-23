@@ -111,12 +111,58 @@ class EvaluationTests(unittest.TestCase):
             with contextlib.redirect_stdout(stdout):
                 self.assertEqual(main(args), 1)
             # FAIL lines show the case's fragments but never the (possibly sensitive) response.
-            self.assertIn("FAIL case: missing=['right']", stdout.getvalue())
+            self.assertIn("FAIL case: missing=['right'] forbidden=[] workflow_error=False", stdout.getvalue())
             self.assertNotIn("wrong", stdout.getvalue())
             # A response for an unknown case makes the run invalid, not merely failing.
             source.write_text('{"id":"other","response":"right"}\n', encoding="utf-8")
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(main(args), 2)
+
+    def test_workflow_errors_fail_the_case(self):
+        """Pipelines: a recorded workflow error fails its case even if the text looks right."""
+        with tempfile.TemporaryDirectory() as directory:
+            cases = Path(directory) / "cases.jsonl"
+            cases.write_text('{"id":"a","prompt":"Q","expected_contains":["30"]}\n'
+                             '{"id":"b","prompt":"Q","expected_contains":["30"]}\n', encoding="utf-8")
+            responses = Path(directory) / "responses.jsonl"
+            # "b" reached the right text but the agent then timed out, so the task failed.
+            responses.write_text(
+                '{"id":"a","response":"30 days","trace":"traces/a.zip"}\n'
+                '{"id":"b","response":"30 days","error":"Timeout 30000ms exceeded"}\n',
+                encoding="utf-8")
+            output = Path(directory) / "results.jsonl"
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                self.assertEqual(main(["--cases", str(cases), "--responses", str(responses),
+                                       "--output", str(output)]), 1)
+            # The error detail stays in the results file, not on the console.
+            self.assertIn("FAIL b: missing=[] forbidden=[] workflow_error=True", stdout.getvalue())
+            self.assertNotIn("Timeout", stdout.getvalue())
+            rows = {row["id"]: row for row in map(json.loads, output.read_text().splitlines())}
+            self.assertEqual(rows["a"]["trace"], "traces/a.zip")
+            self.assertEqual(rows["b"]["error"], "Timeout 30000ms exceeded")
+            manifest = json.loads(output.with_suffix(".manifest.json").read_text())
+            self.assertEqual((manifest["failed"], manifest["workflow_errors"]), (["b"], ["b"]))
+            self.assertEqual(len(manifest["ci95"]), 2)
+
+    def test_missing_and_malformed_pipeline_responses(self):
+        """Pipelines: missing IDs are named, and a blank error or trace is invalid (exit 2)."""
+        with tempfile.TemporaryDirectory() as directory:
+            cases = Path(directory) / "cases.jsonl"
+            cases.write_text('{"id":"a","prompt":"Q","expected_contains":["x"]}\n'
+                             '{"id":"b","prompt":"Q","expected_contains":["x"]}\n', encoding="utf-8")
+            responses = Path(directory) / "responses.jsonl"
+            for body, message in (('{"id":"a","response":"x"}\n', "missing: ['b']"),
+                                  ('{"id":"a","response":"x","error":""}\n'
+                                   '{"id":"b","response":"x"}\n', "error must be"),
+                                  ('{"id":"a","response":"x","trace":5}\n'
+                                   '{"id":"b","response":"x"}\n', "trace must be")):
+                responses.write_text(body, encoding="utf-8")
+                stderr = io.StringIO()
+                with self.subTest(message=message), contextlib.redirect_stderr(stderr):
+                    self.assertEqual(main(["--cases", str(cases), "--responses", str(responses),
+                                           "--output", str(Path(directory) / f"{len(body)}.jsonl")]), 2)
+                    self.assertIn(message, stderr.getvalue())
 
     def test_live_request_and_truncation(self):
         """Live mode (mocked): sends prompt and context only, and rejects truncated answers."""

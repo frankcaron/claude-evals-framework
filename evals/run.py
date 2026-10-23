@@ -131,7 +131,21 @@ def manifest_path(output):
     return Path(output).with_suffix(".manifest.json")
 
 
-def write_manifest(output, args, models, total, passed):
+def validate_responses(responses, cases):
+    if responses.keys() != cases.keys():
+        missing = sorted(cases.keys() - responses.keys())
+        extra = sorted(responses.keys() - cases.keys())
+        raise ValueError(f"Response IDs must exactly match case IDs (missing: {missing}; extra: {extra})")
+    for case_id, row in responses.items():
+        if not isinstance(row.get("response"), str):
+            raise ValueError(f"{case_id}: each recorded response must be a string")
+        for field in ("error", "trace"):
+            value = row.get(field)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"{case_id}: {field} must be a nonempty string when present")
+
+
+def write_manifest(output, args, models, total, failed, errors):
     """Record provenance beside a completed results file; never includes secrets."""
     manifest = {
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -143,7 +157,10 @@ def write_manifest(output, args, models, total, passed):
         "git": git_revision(),
         "python": platform.python_version(),
         "total": total,
-        "passed": passed,
+        "passed": total - len(failed),
+        "ci95": list(wilson_interval(total - len(failed), total)),
+        "failed": failed,
+        "workflow_errors": errors,
     }
     with manifest_path(output).open("x", encoding="utf-8") as destination:
         json.dump(manifest, destination, indent=2)
@@ -166,10 +183,7 @@ def main(argv=None):
         validate_cases(cases)
         responses = read_records(args.responses) if args.responses else None
         if responses is not None:
-            if responses.keys() != cases.keys():
-                raise ValueError("Response IDs must exactly match case IDs")
-            if any(not isinstance(row.get("response"), str) for row in responses.values()):
-                raise ValueError("Each recorded response must be a string")
+            validate_responses(responses, cases)
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if args.live and not api_key:
             raise ValueError("Set ANTHROPIC_API_KEY to use --live")
@@ -183,14 +197,18 @@ def main(argv=None):
         # Refuse to overwrite baselines, datasets, or earlier results.
         with output.open("x", encoding="utf-8") as destination:
             for case_id, case in cases.items():
+                recorded = responses[case_id] if responses is not None else {}
                 if responses is not None:
-                    text = responses[case_id]["response"]
+                    text = recorded["response"]
                     model, usage = None, {}
                 else:
                     text, model, usage = ask_claude(case, args.model, api_key)
                     models.add(model)
                 score = grade(text, case["expected_contains"],
                               case.get("expected_not_contains", []))
+                # A workflow that crashed or timed out failed the task, whatever its text.
+                score["error"] = recorded.get("error")
+                score["passed"] = score["passed"] and score["error"] is None
                 passed += score["passed"]
                 if not score["passed"]:
                     failures.append((case_id, score))
@@ -202,12 +220,16 @@ def main(argv=None):
                     "usage": usage,
                     **score,
                 }
+                if recorded.get("trace"):
+                    row["trace"] = recorded["trace"]
                 destination.write(json.dumps(row, ensure_ascii=False) + "\n")
         # Print fragments from the case file only; responses may be sensitive.
         for case_id, score in failures:
-            print(f"FAIL {case_id}: missing={score['missing']} forbidden={score['forbidden']}")
+            print(f"FAIL {case_id}: missing={score['missing']} forbidden={score['forbidden']} "
+                  f"workflow_error={score['error'] is not None}")
         # Written only after every case completes, so its presence marks a full run.
-        write_manifest(output, args, models, len(cases), passed)
+        write_manifest(output, args, models, len(cases), [case_id for case_id, _ in failures],
+                       [case_id for case_id, score in failures if score["error"] is not None])
         print(f"{format_rate(passed, len(cases))} passed; results: {output}")
         return 0 if passed == len(cases) else 1
     except urllib.error.HTTPError as error:
