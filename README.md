@@ -12,6 +12,11 @@ It layers three kinds of evidence, from cheapest to most expensive:
 | Run comparison | `evals/compare.py` | What regressed, is it more than chance, and was the comparison fair? |
 | Rubric grading | `evals/rubric.py`, `/grade-rubric` | How good is the answer on each criterion, and do graders agree? |
 
+To evaluate an upstream agentic workflow, a test pipeline replaces the bundled
+samples with its own files. The [Playwright integration](integrations/playwright/README.md)
+does this inside a test suite: it drives the workflow once per case, records
+each answer or workflow error, and grades the run with these tools.
+
 Every pass rate is reported with a 95% confidence interval, every complete run
 records its provenance, and CI replays the offline suite on each push.
 
@@ -158,6 +163,16 @@ Recorded response:
 {"id":"policy-01","response":"The return window is 30 days."}
 ```
 
+Optional response fields for pipelines: `error`, a nonempty string, marks a
+workflow failure (crash, timeout, or failed step). The case fails with
+`workflow_error=True` whatever its text, keeping "the agent failed to finish"
+distinct from "the agent answered wrongly". `trace`, a nonempty string such as
+a trace file path, is copied into the result for later review.
+
+```json
+{"id":"policy-01","response":"","error":"workflow timed out after 60000ms"}
+```
+
 To evaluate your own retrieval or agent pipeline, run it separately and export
 answers in this response format. Pass that file with `--responses`; its IDs must
 exactly match the cases. Replay never uses the network. Preserve detailed
@@ -165,7 +180,8 @@ retrieval/tool traces separately for workflow review; the runner scores only
 final answer text and does not validate traces or run orchestration.
 
 Each result contains `id`, `mode`, `model`, `response`, `usage`, `passed`,
-`missing` expected fragments, and `forbidden` fragments that were found. Model
+`missing` expected fragments, `forbidden` fragments that were found, `error`
+(the recorded workflow error or `null`), and `trace` when supplied. Model
 and usage come from the API in live mode; replay records `null` and `{}` because
 it cannot verify the original model or cost. The run prints one `FAIL` line per
 failing case with its missing and forbidden fragments, never the response text.
@@ -178,7 +194,9 @@ command-line arguments also exit with 2. `--output` must end in `.jsonl`.
 After every case completes, the runner writes `<output>.manifest.json` beside
 the results: the timestamp, mode, requested and served models, SHA-256 hashes of
 the case and response files, the Git commit and whether the checkout had
-uncommitted changes, the Python version, and the pass counts. It never records
+uncommitted changes, the Python version, the pass counts and 95% interval
+(`ci95`), and the IDs of failed cases and of cases with workflow errors. CI
+gates and dashboards can read it instead of parsing console output. It never records
 environment variables or keys. A failed live run writes no manifest, so a
 results file without one is incomplete or predates manifests.
 
@@ -254,8 +272,10 @@ cases; and rubric scores are a proxy for user outcomes, not a measure of them.
 
 `.github/workflows/evals.yml` runs on every push and pull request with Python
 3.10 and 3.13: the unit tests, an offline replay of the bundled baseline, and
-validation of the example rubric grades. It uses no API key and makes no
-network calls beyond installing Python. Live and judge runs stay manual because
+validation of the example rubric grades. A second job installs Playwright,
+drives the demo agent through the example cases, grades the answers, and
+uploads `results/playwright/` (results, manifest, traces, report) as a build
+artifact. Neither job uses an API key. Live and judge runs stay manual because
 they cost money and send data to Anthropic.
 
 ## Common evaluation techniques
@@ -318,6 +338,11 @@ approval. Permissions remain controlled by your Claude Code settings.
 │   ├── review-workflow/SKILL.md
 │   └── grade-rubric/SKILL.md
 ├── .github/workflows/evals.yml
+├── integrations/playwright/   # Node; see its README
+│   ├── evals.ts               # recorder fixture and runner glue
+│   ├── playwright.config.ts
+│   ├── demo-agent/index.html
+│   └── tests/
 ├── evals/
 │   ├── run.py
 │   ├── compare.py

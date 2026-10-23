@@ -15,7 +15,10 @@ disable-model-invocation: true
    python3 "$PWD/evals/run.py" --cases "$PWD/examples/cases.jsonl" --responses "$PWD/examples/responses.jsonl" --output "$PWD/results/check-001.jsonl"
    ```
 
-   Substitute approved input paths and a new output filename as needed. Do not
+   Substitute approved input paths and a new output filename as needed. For
+   a Playwright pipeline, run `npx playwright test` in `integrations/playwright`
+   and read `results/playwright/<run id>/results.manifest.json`; report workflow
+   errors separately from wrong answers. Do not
    overwrite old results. Exit 1 means grading failures; exit 2 means the run
    is invalid or incomplete and must not be presented as a complete score.
 3. Inspect the result records. Report passed/total, failing IDs, missing

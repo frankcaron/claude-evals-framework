@@ -1,0 +1,14 @@
+{
+  "name": "claude-evals-playwright",
+  "private": true,
+  "description": "Run an agentic workflow with Playwright and grade it with evals/run.py",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1"
+  }
+}

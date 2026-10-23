@@ -33,3 +33,30 @@ jobs:
           --rubric "$PWD/examples/rubric.json"
           --grades "$PWD/examples/grades-candidate-human.jsonl"
           --cases "$PWD/examples/cases.jsonl" || test $? -eq 1
+
+  playwright:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/playwright
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: integrations/playwright/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      # Drives the demo agent, then grades its answers offline; no API key.
+      - run: npx playwright test
+      - name: Keep the run's results, traces, and report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-eval-run
+          path: results/playwright/
+          retention-days: 14
