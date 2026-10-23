@@ -11,9 +11,11 @@ Run from the repository root:
 ```bash
 python3 -m unittest discover -s "$PWD/tests" -v
 python3 "$PWD/evals/run.py" --cases "$PWD/examples/cases.jsonl" --responses "$PWD/examples/responses.jsonl" --output "$PWD/results/check-001.jsonl"
+python3 "$PWD/evals/compare.py" --baseline "$PWD/results/check-001.jsonl" --candidate "$PWD/results/check-002.jsonl"
 ```
 
-Use a fresh results filename each time. No build or linter is configured.
+Use a fresh results filename each time. On macOS, activate the Homebrew-based
+`.venv` from README.md first; Apple's bundled `python3` may be older than 3.10. No build or linter is configured.
 
 ## Evaluation rules
 
