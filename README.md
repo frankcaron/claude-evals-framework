@@ -278,6 +278,41 @@ uploads `results/playwright/` (results, manifest, traces, report) as a build
 artifact. Neither job uses an API key. Live and judge runs stay manual because
 they cost money and send data to Anthropic.
 
+### Grading pushed eval data
+
+`.github/workflows/eval-data.yml` runs when a push changes anything under
+`eval-data/`, typically an upstream pipeline committing fresh answers. Each
+subdirectory of `eval-data/` is a suite with `cases.jsonl` and
+`responses.jsonl`, plus an optional `gate.json`
+(`{"min_pass_rate": 0.75, "allow_regressions": false}`; without it every case
+must pass) and optional `rubric.json` with `grades.jsonl`. See
+[eval-data/README.md](eval-data/README.md).
+
+For each suite the push changed, `evals/ci.py`:
+
+1. grades the pushed files with `run.py`;
+2. extracts the same suite from the commit before the push, grades it with the
+   **same** grader code, and runs `compare.py`, so only the data differs;
+3. applies the suite's gate, and summarizes the rubric if one is present
+   (informational, but invalid grades fail);
+4. writes a table to the job summary, adds an error annotation per failing
+   suite, and uploads results and manifests as an artifact.
+
+It exits 0 when every graded suite passes, 1 when a gate fails, and 2 for
+invalid data. A new suite, a new branch, or a manual run has no previous
+version to compare; the manual trigger (`workflow_dispatch`) grades every suite.
+Run the same check locally:
+
+```bash
+python3 "$PWD/evals/ci.py" --data-dir "$PWD/eval-data" --before origin/main \
+  --output-dir "$PWD/results/ci-local-001"
+```
+
+Committed answers stay in Git history even after a file is deleted, so commit
+only synthetic or approved, sanitized data. If the answers may hold personal
+data, keep them out of the repository: upload them as a workflow artifact
+instead, and grade them with `run.py` in a job your pipeline triggers.
+
 ## Common evaluation techniques
 
 | Technique | What to measure | Practical starting point |
@@ -337,7 +372,10 @@ approval. Permissions remain controlled by your Claude Code settings.
 │   ├── run-evals/SKILL.md
 │   ├── review-workflow/SKILL.md
 │   └── grade-rubric/SKILL.md
-├── .github/workflows/evals.yml
+├── .github/workflows/
+│   ├── evals.yml              # tests and offline replays on every push
+│   └── eval-data.yml          # grades suites changed under eval-data/
+├── eval-data/support-agent/   # example suite (synthetic)
 ├── integrations/playwright/   # Node; see its README
 │   ├── evals.ts               # recorder fixture and runner glue
 │   ├── playwright.config.ts
@@ -346,7 +384,8 @@ approval. Permissions remain controlled by your Claude Code settings.
 ├── evals/
 │   ├── run.py
 │   ├── compare.py
-│   └── rubric.py
+│   ├── rubric.py
+│   └── ci.py
 ├── examples/
 │   ├── cases.jsonl
 │   ├── responses.jsonl
@@ -356,7 +395,8 @@ approval. Permissions remain controlled by your Claude Code settings.
 │   └── grades-candidate-judge.jsonl
 └── tests/
     ├── test_run.py
-    └── test_rubric.py
+    ├── test_rubric.py
+    └── test_ci.py
 ```
 
 There is no build step or configured linter; CI runs the tests and offline replays. The tests use Python's built-in
