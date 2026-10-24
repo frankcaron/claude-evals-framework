@@ -1,0 +1,52 @@
+name: eval-data
+
+# Runs when a push changes eval inputs, e.g. an upstream pipeline committing
+# fresh responses. Offline replay only: no API key and no billable calls.
+on:
+  push:
+    paths:
+      - "eval-data/**"
+  workflow_dispatch:
+    inputs:
+      all_suites:
+        description: "Grade every suite, not only those changed by the latest push"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# One run per branch at a time, oldest first; never cancel: each push is a record.
+concurrency:
+  group: eval-data-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history, so the commit before the push is available as a baseline.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Grade changed suites against the previous commit
+        env:
+          BEFORE: ${{ github.event.before }}
+          ALL_SUITES: ${{ github.event_name == 'workflow_dispatch' && inputs.all_suites }}
+        run: >
+          python3 evals/ci.py
+          --data-dir eval-data
+          --before "$BEFORE"
+          --after "$GITHUB_SHA"
+          --output-dir "results/ci-$GITHUB_RUN_ID"
+          $( [ "$ALL_SUITES" = "true" ] && echo --all )
+      - name: Keep results and manifests
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-data-results
+          path: results/
+          retention-days: 30
